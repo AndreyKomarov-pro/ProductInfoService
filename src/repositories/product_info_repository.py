@@ -1,3 +1,5 @@
+from uuid import UUID
+
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -8,16 +10,15 @@ class ProductInfoRepository:
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
 
-    async def get_all(self, limit: int, offset: int) -> list[ProductInfoModel]:
+    async def get_by_product_id(self, product_id: UUID) -> ProductInfoModel | None:
         result = await self.session.execute(
             select(ProductInfoModel)
-            .where(ProductInfoModel.is_deleted == False)
-            .order_by(ProductInfoModel.created_at.desc())
-            .with_for_update(skip_locked=True)
-            .offset(offset)
-            .limit(limit)
+            .where(
+                ProductInfoModel.product_id == product_id,
+                ProductInfoModel.is_deleted == False,
+            )
         )
-        return list(result.scalars().all())
+        return result.scalar_one_or_none()
 
     async def create(self, obj: ProductInfoModel) -> ProductInfoModel:
         self.session.add(obj)
