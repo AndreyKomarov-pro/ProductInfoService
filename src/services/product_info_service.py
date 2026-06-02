@@ -15,7 +15,8 @@ class ProductInfoService:
 
     async def _get_product_info_orm(self, product_id: UUID) -> ProductInfoModel:
         info = await self.repo.get_by_product_id(product_id)
-        if not info:
+        if info is None:
+            logger.warning("ProductInfo not found for product_id=%s", product_id)
             raise NotFoundException("ProductInfo", product_id)
         return info
 
