@@ -56,7 +56,7 @@ async def consume_events(producer: KafkaProducer) -> None:
                 raise
             except Exception as exc:
                 logger.error("Failed to process message: %s", exc)
-                dlq_sent = await _send_to_dlq(producer, msg)
+                dlq_sent = await _send_to_dlq(producer, msg, str(exc))
                 if dlq_sent:
                     await consumer.commit()
     finally:
@@ -64,26 +64,25 @@ async def consume_events(producer: KafkaProducer) -> None:
         logger.info("Kafka consumer stopped")
 
 
-async def _send_to_dlq(producer: KafkaProducer, msg) -> bool:
+async def _send_to_dlq(
+    producer: KafkaProducer, msg, error_reason: str,
+) -> bool:
     dlq_payload = json.dumps({
         "original_topic": msg.topic,
         "key": msg.key,
         "value": msg.value if isinstance(msg.value, str) else msg.value.decode("utf-8"),
         "partition": msg.partition,
         "offset": msg.offset,
+        "error_reason": error_reason,
     })
-    try:
-        await producer.send(
-            topic=settings.kafka_topic_dlq,
-            key=msg.key or "",
-            value=dlq_payload,
-        )
-        logger.warning(
-            "Message sent to DLQ from topic=%s offset=%s",
-            msg.topic,
-            msg.offset,
-        )
-        return True
-    except KafkaError as exc:
-        logger.error("Failed to send to DLQ: %s", exc)
-        return False
+    await producer.send(
+        topic=settings.kafka_topic_dlq,
+        key=msg.key or "",
+        value=dlq_payload,
+    )
+    logger.warning(
+        "Message sent to DLQ from topic=%s offset=%s",
+        msg.topic,
+        msg.offset,
+    )
+    return True
