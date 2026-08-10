@@ -4,6 +4,7 @@ from uuid import UUID
 
 from aiokafka import AIOKafkaConsumer
 from aiokafka.errors import KafkaError
+from aiokafka.structs import ConsumerRecord
 
 from src.clients.kafka_producer import KafkaProducer
 from src.config import settings
@@ -27,12 +28,12 @@ async def consume_events(producer: KafkaProducer) -> None:
     await consumer.start()
     logger.info("Kafka consumer started")
     try:
-        async for msg in consumer:
-            try:
-                envelope = json.loads(msg.value)
-                event_id = UUID(envelope["event_id"])
-                async with SessionFactory() as session:
-                    repo = ProcessedEventRepository(session)
+        async with SessionFactory() as session:
+            repo = ProcessedEventRepository(session)
+            async for msg in consumer:
+                try:
+                    envelope = json.loads(msg.value)
+                    event_id = UUID(envelope["event_id"])
                     saved = await repo.save_if_not_exists(
                         ProcessedEventModel(
                             event_id=event_id,
@@ -45,19 +46,19 @@ async def consume_events(producer: KafkaProducer) -> None:
                         await consumer.commit()
                         continue
                     await session.commit()
-                logger.info(
-                    "Processed event %s type=%s from %s",
-                    event_id,
-                    envelope["event_type"],
-                    msg.topic,
-                )
-                await consumer.commit()
-            except KafkaError:
-                raise
-            except Exception as exc:
-                logger.error("Failed to process message: %s", exc)
-                dlq_sent = await _send_to_dlq(producer, msg, str(exc))
-                if dlq_sent:
+                    logger.info(
+                        "Processed event %s type=%s from %s",
+                        event_id,
+                        envelope["event_type"],
+                        msg.topic,
+                    )
+                    await consumer.commit()
+                except KafkaError:
+                    raise
+                except Exception as exc:
+                    await session.rollback()
+                    logger.error("Failed to process message: %s", exc)
+                    await _send_to_dlq(producer, msg, str(exc))
                     await consumer.commit()
     finally:
         await consumer.stop()
@@ -65,8 +66,8 @@ async def consume_events(producer: KafkaProducer) -> None:
 
 
 async def _send_to_dlq(
-    producer: KafkaProducer, msg, error_reason: str,
-) -> bool:
+    producer: KafkaProducer, msg: ConsumerRecord, error_reason: str,
+) -> None:
     dlq_payload = json.dumps({
         "original_topic": msg.topic,
         "key": msg.key,
@@ -85,4 +86,3 @@ async def _send_to_dlq(
         msg.topic,
         msg.offset,
     )
-    return True
