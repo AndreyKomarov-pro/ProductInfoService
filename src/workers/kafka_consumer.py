@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 from uuid import UUID
@@ -28,46 +29,77 @@ async def consume_events(producer: KafkaProducer) -> None:
     await consumer.start()
     logger.info("Kafka consumer started")
     try:
-        async with SessionFactory() as session:
-            repo = ProcessedEventRepository(session)
-            async for msg in consumer:
-                try:
-                    envelope = json.loads(msg.value)
-                    event_id = UUID(envelope["event_id"])
-                    saved = await repo.save_if_not_exists(
-                        ProcessedEventModel(
-                            event_id=event_id,
-                            topic=msg.topic,
-                            event_type=envelope["event_type"],
-                        )
-                    )
-                    if not saved:
-                        logger.debug("Duplicate event %s, skipping", event_id)
-                        await consumer.commit()
-                        continue
-                    await session.commit()
-                    logger.info(
-                        "Processed event %s type=%s from %s",
-                        event_id,
-                        envelope["event_type"],
-                        msg.topic,
-                    )
-                    await consumer.commit()
-                except KafkaError:
-                    raise
-                except Exception as exc:
-                    await session.rollback()
-                    logger.error("Failed to process message: %s", exc)
-                    await _send_to_dlq(producer, msg, str(exc))
-                    await consumer.commit()
+        async for msg in consumer:
+            try:
+                await _process_message(msg, consumer, producer)
+            except KafkaError as exc:
+                logger.error("Kafka error: %s", exc)
+                await asyncio.sleep(settings.kafka_consumer_retry_delay)
+            except Exception as exc:
+                logger.exception("Unexpected error: %s", exc)
     finally:
         await consumer.stop()
         logger.info("Kafka consumer stopped")
 
 
-async def _send_to_dlq(
-    producer: KafkaProducer, msg: ConsumerRecord, error_reason: str,
+async def _process_message(
+    msg: ConsumerRecord,
+    consumer: AIOKafkaConsumer,
+    producer: KafkaProducer,
 ) -> None:
+    try:
+        envelope = json.loads(msg.value)
+        event_id = UUID(envelope["event_id"])
+    except (json.JSONDecodeError, KeyError, ValueError) as exc:
+        logger.error("Non-retryable parse error: %s", exc)
+        await _send_to_dlq(producer, msg, str(exc))
+        await consumer.commit()
+        return
+
+    for attempt in range(1, settings.kafka_consumer_max_retries + 1):
+        try:
+            async with SessionFactory() as session:
+                repo = ProcessedEventRepository(session)
+                saved = await repo.save_if_not_exists(
+                    ProcessedEventModel(
+                        event_id=event_id,
+                        topic=msg.topic,
+                        event_type=envelope["event_type"],
+                    )
+                )
+                if not saved:
+                    logger.debug("Duplicate event %s, skipping", event_id)
+                    break
+                await session.commit()
+            logger.info(
+                "Processed event %s type=%s from %s",
+                event_id,
+                envelope["event_type"],
+                msg.topic,
+            )
+            break
+        except Exception as exc:
+            logger.warning(
+                "Attempt %d/%d failed for event %s: %s",
+                attempt,
+                settings.kafka_consumer_max_retries,
+                event_id,
+                exc,
+            )
+            if attempt == settings.kafka_consumer_max_retries:
+                await _send_to_dlq(producer, msg, str(exc))
+            else:
+                await asyncio.sleep(settings.kafka_consumer_retry_delay)
+
+    await consumer.commit()
+
+
+async def _send_to_dlq(
+    producer: KafkaProducer,
+    msg: ConsumerRecord,
+    error_reason: str,
+) -> None:
+    dlq_topic = f"{msg.topic}.{settings.kafka_dlq_suffix}"
     dlq_payload = json.dumps({
         "original_topic": msg.topic,
         "key": msg.key,
@@ -77,12 +109,13 @@ async def _send_to_dlq(
         "error_reason": error_reason,
     })
     await producer.send(
-        topic=settings.kafka_topic_dlq,
+        topic=dlq_topic,
         key=msg.key or "",
         value=dlq_payload,
     )
     logger.warning(
-        "Message sent to DLQ from topic=%s offset=%s",
+        "Message sent to DLQ %s from topic=%s offset=%s",
+        dlq_topic,
         msg.topic,
         msg.offset,
     )
