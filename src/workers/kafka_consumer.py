@@ -52,7 +52,7 @@ async def _process_message(
         event_id = UUID(envelope["event_id"])
     except (json.JSONDecodeError, KeyError, ValueError) as exc:
         logger.error("Non-retryable parse error: %s", exc)
-        await _send_to_dlq(producer, msg, str(exc))
+        await _send_to_dlq(producer, msg, str(exc), 0)
         await consumer.commit()
         return
 
@@ -87,7 +87,7 @@ async def _process_message(
                 exc,
             )
             if attempt == settings.kafka_consumer_max_retries:
-                await _send_to_dlq(producer, msg, str(exc))
+                await _send_to_dlq(producer, msg, str(exc), attempt)
             else:
                 await asyncio.sleep(settings.kafka_consumer_retry_delay)
 
@@ -98,15 +98,16 @@ async def _send_to_dlq(
     producer: KafkaProducer,
     msg: ConsumerRecord,
     error_reason: str,
+    retry_count: int,
 ) -> None:
     dlq_topic = f"{msg.topic}.{settings.kafka_dlq_suffix}"
     dlq_payload = json.dumps({
-        "original_topic": msg.topic,
-        "key": msg.key,
-        "value": msg.value if isinstance(msg.value, str) else msg.value.decode("utf-8"),
+        "original_message": msg.value if isinstance(msg.value, str) else msg.value.decode("utf-8"),
+        "error_reason": error_reason,
+        "retry_count": retry_count,
+        "topic": msg.topic,
         "partition": msg.partition,
         "offset": msg.offset,
-        "error_reason": error_reason,
     })
     await producer.send(
         topic=dlq_topic,
