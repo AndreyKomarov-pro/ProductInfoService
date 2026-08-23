@@ -6,6 +6,7 @@ from uuid import UUID
 from aiokafka import AIOKafkaConsumer
 from aiokafka.errors import KafkaError
 from aiokafka.structs import ConsumerRecord
+from sqlalchemy.exc import SQLAlchemyError
 
 from src.config import settings
 from src.db import SessionFactory
@@ -50,6 +51,7 @@ async def _process_message(
     try:
         envelope = json.loads(msg.value)
         event_id = UUID(envelope["event_id"])
+        event_type = envelope["event_type"]
     except (json.JSONDecodeError, KeyError, ValueError) as exc:
         logger.error("Non-retryable parse error: %s", exc)
         await _send_to_dlq(producer, msg, str(exc), 0)
@@ -65,7 +67,7 @@ async def _process_message(
                     ProcessedEventModel(
                         event_id=event_id,
                         topic=msg.topic,
-                        event_type=envelope["event_type"],
+                        event_type=event_type,
                     )
                 )
                 if not is_new:
@@ -75,13 +77,11 @@ async def _process_message(
             logger.info(
                 "Processed event %s type=%s from %s",
                 event_id,
-                envelope["event_type"],
+                event_type,
                 msg.topic,
             )
             break
-        except KafkaError:
-            raise
-        except Exception as exc:
+        except SQLAlchemyError as exc:
             last_exc = exc
             logger.warning(
                 "Attempt %d/%d failed for event %s: %s",
