@@ -5,7 +5,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from starlette.responses import JSONResponse
 
-from src.clients.kafka_producer import KafkaProducer
+from src.infrastructure.kafka.producer import KafkaProducer
 from src.exceptions import AppException
 from src.exceptions.handler import app_exception_handler
 from src.routers.product_info_router import router as product_info_router

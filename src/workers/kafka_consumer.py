@@ -7,9 +7,9 @@ from aiokafka import AIOKafkaConsumer
 from aiokafka.errors import KafkaError
 from aiokafka.structs import ConsumerRecord
 
-from src.clients.kafka_producer import KafkaProducer
 from src.config import settings
 from src.db import SessionFactory
+from src.infrastructure.kafka.producer import KafkaProducer
 from src.models.processed_event import ProcessedEventModel
 from src.repositories.processed_event_repository import ProcessedEventRepository
 
@@ -56,18 +56,19 @@ async def _process_message(
         await consumer.commit()
         return
 
+    last_exc: Exception | None = None
     for attempt in range(1, settings.kafka_consumer_max_retries + 1):
         try:
             async with SessionFactory() as session:
                 repo = ProcessedEventRepository(session)
-                saved = await repo.save_if_not_exists(
+                is_new = await repo.save_if_not_exists(
                     ProcessedEventModel(
                         event_id=event_id,
                         topic=msg.topic,
                         event_type=envelope["event_type"],
                     )
                 )
-                if not saved:
+                if not is_new:
                     logger.debug("Duplicate event %s, skipping", event_id)
                     break
                 await session.commit()
@@ -78,7 +79,10 @@ async def _process_message(
                 msg.topic,
             )
             break
+        except KafkaError:
+            raise
         except Exception as exc:
+            last_exc = exc
             logger.warning(
                 "Attempt %d/%d failed for event %s: %s",
                 attempt,
@@ -86,10 +90,12 @@ async def _process_message(
                 event_id,
                 exc,
             )
-            if attempt == settings.kafka_consumer_max_retries:
-                await _send_to_dlq(producer, msg, str(exc), attempt)
-            else:
+            if attempt < settings.kafka_consumer_max_retries:
                 await asyncio.sleep(settings.kafka_consumer_retry_delay)
+    else:
+        await _send_to_dlq(
+            producer, msg, str(last_exc), settings.kafka_consumer_max_retries,
+        )
 
     await consumer.commit()
 
