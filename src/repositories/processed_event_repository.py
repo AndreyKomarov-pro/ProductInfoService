@@ -16,7 +16,7 @@ class ProcessedEventRepository:
                 topic=event.topic,
                 event_type=event.event_type,
             )
-            .on_conflict_do_nothing(index_elements=["event_id"])
+            .on_conflict_do_nothing(index_elements=[ProcessedEventModel.event_id])
             .returning(ProcessedEventModel.id)
         )
         result = await self.session.execute(stmt)

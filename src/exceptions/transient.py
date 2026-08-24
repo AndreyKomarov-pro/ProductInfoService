@@ -1,0 +1,2 @@
+class TransientError(Exception):
+    pass
