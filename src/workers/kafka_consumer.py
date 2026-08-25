@@ -12,8 +12,9 @@ from src.config import settings
 from src.db import SessionFactory
 from src.exceptions import TransientError
 from src.infrastructure.kafka.producer import KafkaProducer
-from src.models.processed_event import ProcessedEventModel
 from src.repositories.processed_event_repository import ProcessedEventRepository
+from src.repositories.product_info_repository import ProductInfoRepository
+from src.services.product_info_service import ProductInfoService
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +52,7 @@ async def _process_message(
         envelope = json.loads(msg.value.decode("utf-8"))
         event_id = UUID(envelope["event_id"])
         event_type = envelope["event_type"]
+        aggregate_id = UUID(envelope["aggregate_id"])
     except (UnicodeDecodeError, json.JSONDecodeError, KeyError, ValueError) as exc:
         logger.error("Non-retryable parse error: %s", exc)
         await _send_to_dlq(producer, msg, str(exc), 0)
@@ -60,7 +62,9 @@ async def _process_message(
     last_exc: Exception | None = None
     for attempt in range(1, settings.kafka_consumer_max_retries + 1):
         try:
-            is_new = await _save_event(event_id, msg.topic, event_type)
+            is_new = await _handle_event(
+                event_id, msg.topic, event_type, aggregate_id,
+            )
             if is_new:
                 logger.info(
                     "Processed event %s type=%s from %s",
@@ -96,16 +100,17 @@ async def _process_message(
     await consumer.commit()
 
 
-async def _save_event(event_id: UUID, topic: str, event_type: str) -> bool:
+async def _handle_event(
+    event_id: UUID, topic: str, event_type: str, aggregate_id: UUID,
+) -> bool:
     try:
         async with SessionFactory() as session:
-            repo = ProcessedEventRepository(session)
-            is_new = await repo.save_if_not_exists(
-                ProcessedEventModel(
-                    event_id=event_id,
-                    topic=topic,
-                    event_type=event_type,
-                )
+            service = ProductInfoService(
+                ProductInfoRepository(session),
+                ProcessedEventRepository(session),
+            )
+            is_new = await service.handle_event(
+                event_id, topic, event_type, aggregate_id,
             )
             if is_new:
                 await session.commit()
