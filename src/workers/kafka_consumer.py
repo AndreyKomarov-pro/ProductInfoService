@@ -14,7 +14,7 @@ from src.exceptions import TransientError
 from src.infrastructure.kafka.producer import KafkaProducer
 from src.repositories.processed_event_repository import ProcessedEventRepository
 from src.repositories.product_info_repository import ProductInfoRepository
-from src.services.product_info_service import ProductInfoService
+from src.services.event_processing_service import EventProcessingService
 
 logger = logging.getLogger(__name__)
 
@@ -105,11 +105,11 @@ async def _handle_event(
 ) -> bool:
     try:
         async with SessionFactory() as session:
-            service = ProductInfoService(
-                ProductInfoRepository(session),
+            service = EventProcessingService(
                 ProcessedEventRepository(session),
+                ProductInfoRepository(session),
             )
-            is_new = await service.handle_event(
+            is_new = await service.process(
                 event_id, topic, event_type, aggregate_id,
             )
             if is_new:

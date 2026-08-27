@@ -1,6 +1,7 @@
 from uuid import UUID
 
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.models.product_info import ProductInfoModel
@@ -24,3 +25,13 @@ class ProductInfoRepository:
         self.session.add(obj)
         await self.session.flush()
         return obj
+
+    async def create_if_not_exists(self, product_id: UUID) -> bool:
+        stmt = (
+            insert(ProductInfoModel)
+            .values(product_id=product_id)
+            .on_conflict_do_nothing(index_elements=[ProductInfoModel.product_id])
+            .returning(ProductInfoModel.id)
+        )
+        result = await self.session.execute(stmt)
+        return result.scalar_one_or_none() is not None
